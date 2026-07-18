@@ -1,36 +1,62 @@
-import json
+"""LangChain agent wiring for the AI Utility Agent.
 
-from gemini_client import ask_gemini
+The old manual `if`/`elif` router is replaced by LangChain's agent graph, which
+chooses tools and executes them automatically.
+"""
 
-from tools import (
-    calculator,
-    weather,
-    send_email,
-    summarize
+from __future__ import annotations
+
+from collections.abc import Iterable
+
+from langchain.agents import create_agent
+from langchain_core.messages import AIMessage
+
+from gemini_client import get_chat_model
+from memory import get_checkpointer, get_session_config
+from prompts import build_system_prompt
+from tools import calculator, send_email, summarize, weather
+
+
+TOOLS = [calculator, weather, send_email, summarize]
+AGENT = create_agent(
+    model=get_chat_model(),
+    tools=TOOLS,
+    system_prompt=build_system_prompt(),
+    checkpointer=get_checkpointer(),
 )
 
-def run_agent(user_input):
 
-    response = ask_gemini(user_input)
+def _extract_final_answer(messages: Iterable[object]) -> str:
+    """Return the last AI message content as a plain string."""
 
-    decision = json.loads(response)
+    for message in reversed(list(messages)):
+        if isinstance(message, AIMessage):
+            content = message.content
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                parts: list[str] = []
+                for item in content:
+                    if isinstance(item, dict):
+                        parts.append(str(item.get("text", "")))
+                    else:
+                        parts.append(str(item))
+                return "".join(parts).strip()
+            return str(content)
+    return ""
 
-    tool = decision["tool"]
 
-    if tool == "calculator":
-        return calculator(decision["input"])
+def run_agent(user_input: str, session_id: str | None = None) -> str:
+    """Run the LangChain agent for one user message.
 
-    elif tool == "weather":
-        return weather(decision["city"])
+    The same session ID keeps the current conversation history alive in memory.
+    """
 
-    elif tool == "send_email":
-        return send_email(
-            decision["receiver"],
-            decision["message"]
+    try:
+        result = AGENT.invoke(
+            {"messages": [{"role": "user", "content": user_input}]},
+            config=get_session_config(session_id),
         )
-
-    elif tool == "summarize":
-        return summarize(decision["text"])
-
-    else:
-        return decision["answer"]
+        return _extract_final_answer(result.get("messages", [])) or "No response generated."
+    except Exception as exc:
+        return f"Agent error: {exc}"
